@@ -1,23 +1,32 @@
-import React, { useRef, useState, forwardRef, useImperativeHandle, useCallback } from 'react';
-import {
-  View,
-  StyleSheet,
-  Dimensions,
-  Image,
-  Platform,
-} from 'react-native';
-import Svg, { Path, G } from 'react-native-svg';
+import React, {
+  useRef,
+  useState,
+  forwardRef,
+  useImperativeHandle,
+  useCallback,
+} from 'react';
+import { View, StyleSheet, Dimensions, Image, Platform } from 'react-native';
+import Svg, { Path as SvgPath, G } from 'react-native-svg';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
-import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import {
+  Gesture,
+  GestureDetector,
+  GestureHandlerRootView,
+} from 'react-native-gesture-handler';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 type Point = { x: number; y: number };
-type Path = { points: Point[]; color: string; width: number; type: 'pen' | 'highlighter' | 'eraser' };
+type DrawPath = {
+  points: Point[];
+  color: string;
+  width: number;
+  type: 'pen' | 'highlighter' | 'eraser';
+};
 
 export type CanvasRef = {
   undo: () => void;
@@ -27,14 +36,15 @@ export type CanvasRef = {
 };
 
 const Canvas = forwardRef<CanvasRef>((_, ref) => {
-  const [paths, setPaths] = useState<Path[]>([]);
-  const [currentPath, setCurrentPath] = useState<Path | null>(null);
+  const [paths, setPaths] = useState<DrawPath[]>([]);
+  const [currentPath, setCurrentPath] = useState<DrawPath | null>(null);
   const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
   const [tool, setTool] = useState<'pen' | 'highlighter' | 'eraser'>('pen');
-  const undoStack = useRef<Path[]>([]);
-  const redoStack = useRef<Path[]>([]);
+  const undoStack = useRef<DrawPath[]>([]);
+  const redoStack = useRef<DrawPath[]>([]);
   const svgRef = useRef<View>(null);
   const isDrawing = useRef(false);
+  const isPinching = useRef(false);
 
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
@@ -58,65 +68,86 @@ const Canvas = forwardRef<CanvasRef>((_, ref) => {
       if (undoStack.current.length > 0) {
         const pathToRestore = undoStack.current.pop();
         if (pathToRestore) {
-          setPaths(prev => [...prev, pathToRestore]);
+          setPaths((prev) => [...prev, pathToRestore]);
         }
       }
     },
     setTool,
-    setBackgroundImage
+    setBackgroundImage,
   }));
 
-  const getCoordinates = useCallback((x: number, y: number): Point => {
-    const point = { x, y };
-    if (Platform.OS === 'web') {
-      const element = svgRef.current;
-      if (element) {
-        try {
-          // @ts-ignore
-          const rect = element.getBoundingClientRect?.();
-          if (rect) {
-            point.x = Math.max(0, Math.min((x - rect.left) / scale.value, SCREEN_WIDTH));
-            point.y = Math.max(0, Math.min((y - rect.top) / scale.value, SCREEN_HEIGHT));
+  const getCoordinates = useCallback(
+    (x: number, y: number): Point => {
+      const point = { x, y };
+      if (Platform.OS === 'web') {
+        const element = svgRef.current;
+        if (element) {
+          try {
+            // @ts-ignore
+            const rect = element.getBoundingClientRect?.();
+            if (rect) {
+              point.x = Math.max(
+                0,
+                Math.min(
+                  (x - rect.left - translateX.value) / scale.value,
+                  SCREEN_WIDTH
+                )
+              );
+              point.y = Math.max(
+                0,
+                Math.min(
+                  (y - rect.top - translateY.value) / scale.value,
+                  SCREEN_HEIGHT
+                )
+              );
+            }
+          } catch (error) {
+            console.error('Error getting coordinates:', error);
           }
-        } catch (error) {
-          console.error('Error getting coordinates:', error);
         }
       }
-    }
-    return point;
-  }, [scale.value]);
+      return point;
+    },
+    [scale.value, translateX.value, translateY.value]
+  );
 
-  const panGesture = Gesture.Pan()
+  const drawGesture = Gesture.Pan()
+    .minDistance(1)
+    .maxPointers(1)
     .onStart((event) => {
-      if (isDrawing.current) return;
+      if (isPinching.current) return;
       isDrawing.current = true;
-      
+
       const point = getCoordinates(event.x, event.y);
       const newPath = {
         points: [point],
-        color: tool === 'highlighter' ? 'rgba(255, 255, 0, 0.5)' : 
-               tool === 'eraser' ? 'white' : 'black',
+        color:
+          tool === 'highlighter'
+            ? 'rgba(255, 255, 0, 0.5)'
+            : tool === 'eraser'
+            ? 'white'
+            : 'black',
         width: tool === 'highlighter' ? 20 : tool === 'eraser' ? 30 : 2,
-        type: tool
+        type: tool,
       };
       setCurrentPath(newPath);
     })
     .onUpdate((event) => {
-      if (!isDrawing.current || !currentPath) return;
-      
+      if (!isDrawing.current || !currentPath || isPinching.current) return;
+
       const point = getCoordinates(event.x, event.y);
-      setCurrentPath(prev => {
+      setCurrentPath((prev) => {
         if (!prev) return null;
         return {
           ...prev,
-          points: [...prev.points, point]
+          points: [...prev.points, point],
         };
       });
     })
     .onEnd(() => {
       if (!isDrawing.current || !currentPath) return;
-      
-      setPaths(prev => [...prev, currentPath]);
+
+      setPaths((prev) => [...prev, currentPath]);
       setCurrentPath(null);
       isDrawing.current = false;
       redoStack.current = [];
@@ -128,14 +159,18 @@ const Canvas = forwardRef<CanvasRef>((_, ref) => {
 
   const pinchGesture = Gesture.Pinch()
     .onStart(() => {
+      isPinching.current = true;
       savedScale.value = scale.value;
     })
     .onUpdate((event) => {
       scale.value = Math.min(Math.max(savedScale.value * event.scale, 0.5), 3);
+    })
+    .onEnd(() => {
+      isPinching.current = false;
     });
 
-  const dragGesture = Gesture.Pan()
-    .averageTouches(true)
+  const panGesture = Gesture.Pan()
+    .minPointers(2)
     .onStart(() => {
       savedTranslateX.value = translateX.value;
       savedTranslateY.value = translateY.value;
@@ -145,8 +180,8 @@ const Canvas = forwardRef<CanvasRef>((_, ref) => {
       translateY.value = savedTranslateY.value + event.translationY;
     })
     .onEnd(() => {
-      const maxTranslateX = (scale.value - 1) * SCREEN_WIDTH / 2;
-      const maxTranslateY = (scale.value - 1) * SCREEN_HEIGHT / 2;
+      const maxTranslateX = ((scale.value - 1) * SCREEN_WIDTH) / 2;
+      const maxTranslateY = ((scale.value - 1) * SCREEN_HEIGHT) / 2;
 
       translateX.value = withSpring(
         Math.min(Math.max(translateX.value, -maxTranslateX), maxTranslateX)
@@ -157,7 +192,7 @@ const Canvas = forwardRef<CanvasRef>((_, ref) => {
     });
 
   const composedGesture = Gesture.Simultaneous(
-    Gesture.Race(dragGesture, panGesture),
+    Gesture.Race(panGesture, drawGesture),
     pinchGesture
   );
 
@@ -169,25 +204,28 @@ const Canvas = forwardRef<CanvasRef>((_, ref) => {
     ],
   }));
 
-  const renderPath = useCallback((path: Path) => {
-    if (!path?.points?.length) return null;
+  const renderPath = useCallback(
+    (path: DrawPath) => {
+      if (!path?.points?.length) return null;
 
-    const d = path.points.reduce((acc, point, index) => {
-      if (index === 0) return `M ${point.x} ${point.y}`;
-      return `${acc} L ${point.x} ${point.y}`;
-    }, '');
+      const d = path.points.reduce((acc, point, index) => {
+        if (index === 0) return `M ${point.x} ${point.y}`;
+        return `${acc} L ${point.x} ${point.y}`;
+      }, '');
 
-    return (
-      <Path
-        d={d}
-        stroke={path.color}
-        strokeWidth={path.width / scale.value}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-    );
-  }, [scale.value]);
+      return (
+        <SvgPath
+          d={d}
+          stroke={path.color}
+          strokeWidth={path.width / scale.value}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+      );
+    },
+    [scale.value]
+  );
 
   return (
     <GestureHandlerRootView style={styles.container}>
@@ -200,17 +238,15 @@ const Canvas = forwardRef<CanvasRef>((_, ref) => {
               resizeMode="contain"
             />
           )}
-          <Svg 
+          <Svg
             ref={svgRef}
-            height={SCREEN_HEIGHT} 
+            height={SCREEN_HEIGHT}
             width={SCREEN_WIDTH}
             style={StyleSheet.absoluteFill}
           >
             <G>
               {paths.map((path, index) => (
-                <React.Fragment key={index}>
-                  {renderPath(path)}
-                </React.Fragment>
+                <React.Fragment key={index}>{renderPath(path)}</React.Fragment>
               ))}
               {currentPath && renderPath(currentPath)}
             </G>
